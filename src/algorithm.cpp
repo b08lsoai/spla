@@ -47,6 +47,9 @@
 #include <time.h>
 #include <vector>
 
+#include <chrono>
+#include <fstream>
+
 #define INF std::numeric_limits<float>::infinity()
 
 namespace spla {
@@ -484,14 +487,23 @@ namespace spla {
         Timer tight;
 #endif
 
+        std::ofstream csv_out("mst_profile.csv");
+        csv_out << "iteration,step1_mxv,step2_cedge,step3_t_vec,step4_index,step5_search,step5_update_parent,step6_filter_s,total\n";
+
         while (comp > 1) {
 #ifdef SPLA_RELEASE
             tight.start();
 #endif
             iteration++;
             int edges_added_this_iteration = 0;
+
+            Timer t_step1, t_step2, t_step3, t_step4, t_step5, t_step6, t_total;
+            t_total.start();
+
+            t_step1.start();
             spla::exec_mxv_masked(edge, mask, S, parent, spla::MUL_PAIR, spla::MIN_PAIR,
                                   spla::ALWAYS_PAIR, init_inf);
+            t_step1.stop();
 #ifdef SPLA_DEBUG
 
             std::cout << "edge = [";
@@ -503,6 +515,7 @@ namespace spla {
             std::cout << "]\n";
 #endif
 
+            t_step2.start();
             for (int32_t i = 0; i < n; i++) {
                 cedge->set_pair(i, init_val);
             }
@@ -517,6 +530,7 @@ namespace spla {
                 auto min_for_comp = p1.weight <= p2.weight ? p1 : p2;
                 cedge->set_pair(p_i, min_for_comp);
             }
+            t_step2.stop();
 
 #ifdef SPLA_DEBUG
             std::cout << "cedge = [";
@@ -528,6 +542,7 @@ namespace spla {
             std::cout << "]\n";
 #endif
 
+            t_step3.start();
             for (int32_t i = 0; i < n; i++) {
                 spla::T_PAIR parent_v;
                 spla::T_PAIR cedge_v;
@@ -535,9 +550,11 @@ namespace spla {
                 cedge->get_pair(parent_v.vertex, cedge_v);
                 t_vec->set_pair(i, cedge_v);
             }
+            t_step3.stop();
 
             auto index = spla::Vector::make(n, spla::INT);
 
+            t_step4.start();
             for (int32_t i = 0; i < n; i++) {
                 spla::T_PAIR edge_v, t_v;
                 edge->get_pair(i, edge_v);
@@ -577,6 +594,7 @@ namespace spla {
                 temp->get_int(p_i, temp_v);
                 index->set_int(i, temp_v);
             }
+            t_step4.stop();
 
 #ifdef SPLA_DEBUG
             std::cout << "index = [";
@@ -587,23 +605,38 @@ namespace spla {
             }
             std::cout << "]\n";
 #endif
+            double step5a_total_ms = 0.0;// поиск min-ребра
+            double step5b_total_ms = 0.0;// обновление/копирование parent
+            t_step5.start();
+
+            Timer t_copy;
+            t_copy.start();
             auto new_parent = spla::Vector::make(n, spla::PAIR);
             for (int32_t i = 0; i < n; i++) {
                 spla::T_PAIR p;
                 parent->get_pair(i, p);
                 new_parent->set_pair(i, p);
             }
+            t_copy.stop();
+            step5b_total_ms += t_copy.get_elapsed_ms();
+
             for (int32_t i = 0; i < n; i++) {
                 spla::T_INT ind_v;
                 index->get_int(i, ind_v);
                 if (i == ind_v) {
+                    Timer t_search;
+                    t_search.start();
+                    // мое начало
                     auto         parent_i = spla::Scalar::make(spla::PAIR);
                     spla::T_PAIR p1;
                     parent->get_pair(i, p1);
                     parent_i->set_pair(p1);
+                    // конец моего
 
                     auto row = spla::Vector::make(n, spla::PAIR);
                     spla::exec_m_extract_row(row, S, i, spla::IDENTITY_PAIR);
+
+                    // мое начало
                     spla::exec_v_assign_bslct_masked(row, parent, init_inf, parent_i, spla::SECOND_PAIR, spla::EQVERTEX_PAIR);
 
                     auto         min_edge_scalar = spla::Scalar::make(spla::PAIR);
@@ -615,11 +648,44 @@ namespace spla {
                     int   min_vertex = min_edge_pair.vertex;
                     float min_weight = min_edge_pair.weight;
 
+                    t_search.stop();
+                    step5a_total_ms += t_search.get_elapsed_ms();
+
                     if (min_vertex == -1 || min_weight >= INF)
                         continue;
+                    // мое конец
+
+                    // полина начало
+                    // int   min_vertex = -1;
+                    // float min_weight = INF;
+
+                    // for (int32_t j = 0; j < n; j++) {
+                    //     spla::T_PAIR pair_row;
+                    //     row->get_pair(j, pair_row);
+                    //     auto pair_row_weight = pair_row.weight;
+                    //     auto pair_row_vertex = pair_row.vertex;
+                    //     if (pair_row_weight < INF) {
+                    //         spla::T_PAIR p1, p2;
+                    //         parent->get_pair(i, p1);
+                    //         parent->get_pair(pair_row_vertex, p2);
+                    //         if (p1.vertex != p2.vertex) {
+                    //             if (pair_row_weight < min_weight) {
+                    //                 min_weight = pair_row_weight;
+                    //                 min_vertex = j;
+                    //             }
+                    //         }
+                    //     }
+                    // }
+                    // if (min_vertex == -1)
+                    //     continue;
+                    // полина конец
+
                     T->set_float(i, min_vertex, min_weight);
                     T->set_float(min_vertex, i, min_weight);
                     edges_added_this_iteration++;
+
+                    Timer t_update;
+                    t_update.start();
 
                     spla::T_PAIR p;
                     spla::T_PAIR old_p;
@@ -638,9 +704,13 @@ namespace spla {
                         if (p1.vertex == old_p.vertex)
                             new_parent->set_pair(k, spla::T_PAIR(0.0f, p.vertex));
                     }
+                    t_update.stop();
+                    step5b_total_ms += t_update.get_elapsed_ms();
                 }
             }
             parent = new_parent;
+            t_step5.stop();
+
             std::vector<bool> seen(n, false);
             for (uint i = 0; i < n; i++) {
                 T_PAIR p;
@@ -670,16 +740,59 @@ namespace spla {
             Library::get()->time_profile_dump();
             Library::get()->time_profile_reset();
 #endif
+            t_step6.start();
+            if (comp != 1) {
+                // мое
+                spla::exec_m_assign_bslct_masked(S, parent, init_inf, spla::SECOND_PAIR, spla::EQVERTEX_PAIR);
+
+                // полина начало
+                // auto filtered_S = spla::Matrix::make(n, n, spla::PAIR);
+                // for (int32_t i = 0; i < n; i++) {
+                //     for (int32_t j = 0; j < n; j++) {
+                //         spla::T_PAIR val;
+                //         S->get_pair(i, j, val);
+                //         if (val.weight != std::numeric_limits<float>::infinity()) {
+                //             spla::T_PAIR parent_i, parent_j;
+                //             parent->get_pair(i, parent_i);
+                //             parent->get_pair(j, parent_j);
+                //             if ((parent_i.vertex != parent_j.vertex) &&
+                //                 (val.weight != std::numeric_limits<float>::infinity())) {
+                //                 filtered_S->set_pair(i, j, val);
+                //             }
+                //         }
+                //     }
+                // }
+                // S = filtered_S;
+                // полина конец
+            }
+            t_step6.stop();
+            t_total.stop();
+
+            printf("step5_a (%f) + step5_b (%f) = %f, step5 = %f\n", step5a_total_ms, step5b_total_ms, step5a_total_ms + step5b_total_ms, t_step5.get_elapsed_ms());
+            csv_out << iteration << ","
+                    << t_step1.get_elapsed_ms() << ","
+                    << t_step2.get_elapsed_ms() << ","
+                    << t_step3.get_elapsed_ms() << ","
+                    << t_step4.get_elapsed_ms() << ","
+                    << step5a_total_ms << ","
+                    << step5b_total_ms << ","
+                    << t_step6.get_elapsed_ms() << ","
+                    << t_total.get_elapsed_ms() << "\n";
+            csv_out.flush();
+
             if (comp == 1) {
                 std::cout << "MST complete after " << iteration << " iterations"
                           << std::endl;
+                csv_out.close();
                 return Status::Ok;
             }
-            spla::exec_m_assign_bslct_masked(S, parent, init_inf, spla::SECOND_PAIR, spla::EQVERTEX_PAIR);
+
             if (edges_added_this_iteration == 0) {
+                csv_out.close();
                 return Status::Ok;
             }
         }
+        csv_out.close();
         return Status::Ok;
     }
 
