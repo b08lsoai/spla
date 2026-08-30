@@ -35,8 +35,40 @@
 #include "common.hpp"
 #include "options.hpp"
 
+#include <chrono>
+#include <cmath>
+#include <fstream>
 #include <iostream>
+#include <numeric>
 #include <spla.hpp>
+#include <vector>
+
+namespace {
+
+    double mean(const std::vector<double>& v) {
+        return std::accumulate(v.begin(), v.end(), 0.0) / static_cast<double>(v.size());
+    }
+
+    double stdev(const std::vector<double>& v) {
+        if (v.size() < 2) return 0.0;// как statistics.stdev, но не бросаем исключение
+        double m      = mean(v);
+        double sq_sum = 0.0;
+        for (double x : v) sq_sum += (x - m) * (x - m);
+        return std::sqrt(sq_sum / static_cast<double>(v.size() - 1));// sample stdev, n-1
+    }
+
+    void write_csv_row(std::ofstream& out, const std::string& tool,
+                       const std::string&         graph_name,
+                       const std::vector<double>& times_ms,
+                       double                     mst_weight) {
+        double avg = mean(times_ms);
+        double sd  = stdev(times_ms);
+        double mn  = *std::min_element(times_ms.begin(), times_ms.end());
+        double mx  = *std::max_element(times_ms.begin(), times_ms.end());
+        out << tool << "," << graph_name << "," << avg << "," << sd << "," << mn << "," << mx << "," << mst_weight << "\n";
+    }
+
+}// namespace
 
 int main(int argc, const char* const* argv) {
     auto options = make_options(
@@ -93,18 +125,24 @@ int main(int argc, const char* const* argv) {
     double total_weight_gpu = 0.0;
     double total_weight_cpu = 0.0;
 
+    std::vector<double> cpu_times_ms, gpu_times_ms;
+
     if (args["run-cpu"].as<bool>()) {
         library->set_force_no_acceleration(true);
 
         for (int i = 0; i < n_iters; ++i) {
+            spla::Timer t_cpu;
             T_cpu->clear();
             S = spla::Matrix::make(N, N, spla::PAIR);
             for (std::size_t k = 0; k < loader.get_n_values(); ++k) {
                 S->set_pair(Ai[k], Aj[k], spla::T_PAIR(Aw[k], Aj[k]));
             }
             timer_cpu.lap_begin();
+            t_cpu.start();
             spla::mst(T_cpu, S, desc, nullptr);
+            t_cpu.stop();
             timer_cpu.lap_end();
+            cpu_times_ms.push_back(t_cpu.get_elapsed_ms());
         }
 
         total_weight_cpu = 0;
@@ -125,14 +163,18 @@ int main(int argc, const char* const* argv) {
         library->set_force_no_acceleration(false);
 
         for (int i = 0; i < n_iters; ++i) {
+            spla::Timer t_gpu;
             T_gpu->clear();
             S = spla::Matrix::make(N, N, spla::PAIR);
             for (std::size_t k = 0; k < loader.get_n_values(); ++k) {
                 S->set_pair(Ai[k], Aj[k], spla::T_PAIR(Aw[k], Aj[k]));
             }
             timer_gpu.lap_begin();
+            t_gpu.start();
             spla::mst(T_gpu, S, desc, nullptr);
+            t_gpu.stop();
             timer_gpu.lap_end();
+            gpu_times_ms.push_back(t_gpu.get_elapsed_ms());
         }
 
         total_weight_gpu = 0;
@@ -148,6 +190,18 @@ int main(int argc, const char* const* argv) {
 
         std::cout << "GPU MST total weight: " << total_weight_gpu << std::endl;
     }
+
+    std::ofstream csv_out("mst_profile.csv");
+    csv_out << "tool,graph,avg,sd,min,max,mst_weight\n";
+    const std::string& graph_name = "nemeth15";
+
+    if (!cpu_times_ms.empty()) {
+        write_csv_row(csv_out, "spla_cpu", graph_name, cpu_times_ms, total_weight_cpu);
+    }
+    if (!gpu_times_ms.empty()) {
+        write_csv_row(csv_out, "spla_gpu", graph_name, gpu_times_ms, total_weight_gpu);
+    }
+    csv_out.close();
 
     spla::Library::get()->finalize();
 
