@@ -121,6 +121,7 @@ int main(int argc, const char* const* argv) {
     auto desc = spla::Descriptor::make();
 
     const int n_iters = args["niters"].as<int>();
+    const int n_warm  = 10;
 
     double total_weight_gpu = 0.0;
     double total_weight_cpu = 0.0;
@@ -129,6 +130,16 @@ int main(int argc, const char* const* argv) {
 
     if (args["run-cpu"].as<bool>()) {
         library->set_force_no_acceleration(true);
+
+        // warm up
+        for (int i = 0; i < n_warm; ++i) {
+            T_cpu->clear();
+            S = spla::Matrix::make(N, N, spla::PAIR);
+            for (std::size_t k = 0; k < loader.get_n_values(); ++k) {
+                S->set_pair(Ai[k], Aj[k], spla::T_PAIR(Aw[k], Aj[k]));
+            }
+            spla::mst(T_cpu, S, desc, nullptr);
+        }
 
         for (int i = 0; i < n_iters; ++i) {
             spla::Timer t_cpu;
@@ -161,6 +172,16 @@ int main(int argc, const char* const* argv) {
 
     if (args["run-gpu"].as<bool>()) {
         library->set_force_no_acceleration(false);
+
+        // warm up
+        for (int i = 0; i < n_warm; ++i) {
+            T_gpu->clear();
+            S = spla::Matrix::make(N, N, spla::PAIR);
+            for (std::size_t k = 0; k < loader.get_n_values(); ++k) {
+                S->set_pair(Ai[k], Aj[k], spla::T_PAIR(Aw[k], Aj[k]));
+            }
+            spla::mst(T_gpu, S, desc, nullptr);
+        }
 
         for (int i = 0; i < n_iters; ++i) {
             spla::Timer t_gpu;
