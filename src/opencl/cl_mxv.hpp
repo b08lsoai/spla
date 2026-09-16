@@ -295,7 +295,6 @@ namespace spla {
                     .add_op("OP_SELECT", op_select.template as<OpSelect>());
 
             if constexpr (std::is_same_v<T, Pair>) {
-                program_builder.add_define("USE_PAIR_SEMANTICS", 1);
                 program_builder.add_define("USE_PAIR_COMPARISON", 1);
             }
 
